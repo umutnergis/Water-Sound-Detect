@@ -12,52 +12,59 @@ from datetime import datetime
 
 class WaterSoundComparer:
     def __init__(self):
-        # Initialize I2C bus
+        # I2C veri yolunu başlat
         self.i2c = busio.I2C(board.SCL, board.SDA)
         
-        # Initialize ADS1115
+        # ADS1115 analog-dijital dönüştürücüyü başlat
         self.ads = ADS.ADS1115(self.i2c)
         self.ads.gain = 1
         self.ads.data_rate = 860
         
-        # Connect MAX9814 output to A0 and LDR to A1 on ADS1115
+        # Sensör kanalları
         self.sound_chan = AnalogIn(self.ads, ADS.P0)
         self.ldr_chan = AnalogIn(self.ads, ADS.P1)
         
-        # Audio parameters
+        # Ses parametreleri
         self.RATE = 860
         self.CHANNELS = 1
-        self.WINDOW_SIZE = 1720  # 2 seconds for better analysis
+        self.WINDOW_SIZE = 1720
         
-        # Sound detection parameters
-        self.MIN_AMPLITUDE = 0.1
+        # Geliştirilmiş ses algılama parametreleri
+        self.MIN_AMPLITUDE = 0.15  # Arttırıldı
         self.consecutive_matches = 0
         self.last_match_time = None
-        self.MATCH_TIMEOUT = 10  # seconds
-        self.REQUIRED_MATCHES = 20
+        self.MATCH_TIMEOUT = 8  # Azaltıldı
+        self.REQUIRED_MATCHES = 30  # Arttırıldı
 
-        # LDR parameters
+        # LDR parametreleri
         self.light_start_time = None
         self.LIGHT_THRESHOLD = 2.4
-        self.LIGHT_ALERT_THRESHOLD = 30  # seconds
+        self.LIGHT_ALERT_THRESHOLD = 30
         
-        # Directory and features
+        # Referans ses yönetimi
         self.samples_dir = "water_samples"
         self.reference_features = {}
         self.load_reference_sounds()
 
+        # Su sesi karakteristik frekans bantları
+        self.WATER_FREQ_BANDS = {
+            'low': (200, 400),
+            'mid': (400, 800),
+            'high': (800, 1600)
+        }
+
     def load_reference_sounds(self):
-        """Load all saved water sounds and extract their features"""
+        """Referans su seslerini yükle"""
         if not os.path.exists(self.samples_dir):
-            print("No reference sounds found! Please record some sounds first.")
+            print("Referans ses dizini bulunamadı!")
             return
 
         wav_files = [f for f in os.listdir(self.samples_dir) if f.endswith('.wav')]
         if not wav_files:
-            print("No .wav files found in water_samples directory!")
+            print("Su sesi örnekleri bulunamadı!")
             return
 
-        print("Loading reference sounds...")
+        print("Referans su sesleri yükleniyor...")
         for wav_file in wav_files:
             filepath = os.path.join(self.samples_dir, wav_file)
             try:
@@ -69,110 +76,124 @@ class WaterSoundComparer:
                     features = self.extract_features(samples)
                     if features is not None:
                         self.reference_features[wav_file] = features
-                        print(f"Loaded features from {wav_file}")
+                        print(f"{wav_file} özellikleri yüklendi")
             except Exception as e:
-                print(f"Error loading {wav_file}: {str(e)}")
+                print(f"Hata: {wav_file} yüklenemedi - {str(e)}")
 
     def _spectral_flatness(self, spectrum):
-        """Calculate spectral flatness (Wiener entropy)"""
-        spectrum = spectrum + 1e-10  # Avoid log(0)
+        """Spektral düzlük hesaplama (Wiener entropi)"""
+        spectrum = spectrum + 1e-10
         geometric_mean = np.exp(np.mean(np.log(spectrum)))
         arithmetic_mean = np.mean(spectrum)
         return geometric_mean / arithmetic_mean
 
     def _temporal_consistency(self, samples):
-        """Calculate temporal consistency using overlapping windows"""
+        """Zamansal tutarlılık analizi"""
         window_size = len(samples) // 4
         windows = np.array([samples[i:i+window_size] for i in range(0, len(samples)-window_size, window_size//2)])
         rms_values = np.sqrt(np.mean(windows**2, axis=1))
         return np.std(rms_values) / (np.mean(rms_values) + 1e-10)
 
-    def _spectral_rolloff(self, spectrum, freqs, percentile=0.85):
-        """Calculate frequency below which percentile of the spectrum's energy is contained"""
-        cumsum = np.cumsum(spectrum)
-        threshold = percentile * cumsum[-1]
-        rolloff_index = np.where(cumsum >= threshold)[0][0]
-        return freqs[rolloff_index]
+    def _water_sound_signature(self, spectrum, freqs):
+        """Su sesi karakteristiklerini kontrol et"""
+        # Spektral yumuşaklık
+        spectral_smoothness = np.mean(np.abs(np.diff(spectrum)))
+        
+        # Frekans bantlarındaki enerji
+        energy_200_800 = np.mean(spectrum[(freqs >= 200) & (freqs <= 800)])
+        energy_above_1000 = np.mean(spectrum[freqs > 1000])
+        
+        # Su sesi enerji oranı
+        energy_ratio = energy_200_800 / (energy_above_1000 + 1e-10)
+        
+        return spectral_smoothness, energy_ratio
 
-    def _spectral_bandwidth(self, spectrum, freqs):
-        """Calculate the bandwidth of the spectrum"""
-        centroid = np.average(freqs, weights=spectrum)
-        bandwidth = np.sqrt(np.average((freqs - centroid)**2, weights=spectrum))
-        return bandwidth
+    def _check_amplitude_consistency(self, samples):
+        """Genlik tutarlılığını kontrol et"""
+        segments = np.array_split(samples, 8)
+        rms_values = [np.sqrt(np.mean(segment**2)) for segment in segments]
+        variation = np.std(rms_values) / (np.mean(rms_values) + 1e-10)
+        return variation < 0.5
+
+    def _calculate_band_energy(self, spectrum, freqs, band):
+        """Belirli frekans bandındaki enerjiyi hesapla"""
+        mask = (freqs >= band[0]) & (freqs <= band[1])
+        return np.mean(spectrum[mask]) if any(mask) else 0
 
     def extract_features(self, samples):
-        """Extract features from audio samples"""
+        """Geliştirilmiş özellik çıkarma"""
         if len(samples) == 0:
             return None
             
-        # Convert to numpy array and normalize
+        # Normalize et
         samples = np.array(samples, dtype=float)
         max_abs = np.max(np.abs(samples))
         if max_abs > 0:
             samples = samples / max_abs
         
-        # Check if amplitude is too low
+        # Minimum genlik kontrolü
         if np.max(np.abs(samples)) < self.MIN_AMPLITUDE:
             return None
             
-        # Apply Hanning window
+        # Pencere uygula ve FFT hesapla
         windowed = samples * signal.windows.hann(len(samples))
-        
-        # Compute FFT
         fft_data = fft(windowed)
         fft_freq = np.fft.fftfreq(len(samples), 1/self.RATE)
         
-        # Get positive frequencies
+        # Pozitif frekansları al
         positive_freq_mask = fft_freq > 0
         fft_data = np.abs(fft_data[positive_freq_mask])
         fft_freq = fft_freq[positive_freq_mask]
         
-        # Frequency band analysis
-        low_freq = (fft_freq >= 100) & (fft_freq <= 500)
-        mid_freq = (fft_freq > 500) & (fft_freq <= 1000)
-        high_freq = (fft_freq > 1000) & (fft_freq <= 2000)
-        
-        # Extract features with error handling
         try:
+            # Su sesi karakteristiklerini hesapla
+            smoothness, energy_ratio = self._water_sound_signature(fft_data, fft_freq)
+            amplitude_consistent = self._check_amplitude_consistency(samples)
+            
+            # Frekans bantlarını analiz et
             features = {
-                'low_freq_power': np.mean(fft_data[low_freq]) if any(low_freq) else 0,
-                'mid_freq_power': np.mean(fft_data[mid_freq]) if any(mid_freq) else 0,
-                'high_freq_power': np.mean(fft_data[high_freq]) if any(high_freq) else 0,
-                'freq_ratio_low_mid': (np.mean(fft_data[low_freq]) / (np.mean(fft_data[mid_freq]) + 1e-10)) if any(low_freq) and any(mid_freq) else 0,
-                'freq_ratio_mid_high': (np.mean(fft_data[mid_freq]) / (np.mean(fft_data[high_freq]) + 1e-10)) if any(mid_freq) and any(high_freq) else 0,
-                'spectral_centroid': np.average(fft_freq, weights=np.abs(fft_data)),
+                'low_freq_power': self._calculate_band_energy(fft_data, fft_freq, self.WATER_FREQ_BANDS['low']),
+                'mid_freq_power': self._calculate_band_energy(fft_data, fft_freq, self.WATER_FREQ_BANDS['mid']),
+                'high_freq_power': self._calculate_band_energy(fft_data, fft_freq, self.WATER_FREQ_BANDS['high']),
+                'freq_ratio_low_mid': (self._calculate_band_energy(fft_data, fft_freq, self.WATER_FREQ_BANDS['low']) /
+                                     (self._calculate_band_energy(fft_data, fft_freq, self.WATER_FREQ_BANDS['mid']) + 1e-10)),
+                'freq_ratio_mid_high': (self._calculate_band_energy(fft_data, fft_freq, self.WATER_FREQ_BANDS['mid']) /
+                                      (self._calculate_band_energy(fft_data, fft_freq, self.WATER_FREQ_BANDS['high']) + 1e-10)),
                 'spectral_flatness': self._spectral_flatness(fft_data),
                 'temporal_consistency': self._temporal_consistency(samples),
-                'zero_crossing_rate': np.mean(np.abs(np.diff(np.signbit(samples)))),
-                'spectral_bandwidth': self._spectral_bandwidth(fft_data, fft_freq)
+                'spectral_smoothness': smoothness,
+                'water_energy_ratio': energy_ratio,
+                'amplitude_consistency': 1.0 if amplitude_consistent else 0.0
             }
             return features
+            
         except Exception as e:
-            print(f"Error extracting features: {str(e)}")
+            print(f"Özellik çıkarma hatası: {str(e)}")
             return None
 
-    def compare_with_references(self, features, threshold=0.8):
-        """Compare current features with reference features"""
+    def compare_with_references(self, features, threshold=0.9):  # Eşik değeri arttırıldı
+        """Geliştirilmiş özellik karşılaştırma"""
         if not self.reference_features or not features:
             return False, None
             
+        # Su sesine özel ağırlıklar
         feature_weights = {
-            'low_freq_power': 1.5,
-            'mid_freq_power': 1.2,
-            'high_freq_power': 1.0,
-            'freq_ratio_low_mid': 1.8,
-            'freq_ratio_mid_high': 1.8,
-            'spectral_centroid': 1.3,
-            'spectral_flatness': 1.4,
-            'temporal_consistency': 1.6,
-            'zero_crossing_rate': 1.2,
-            'spectral_bandwidth': 1.2
+            'low_freq_power': 2.0,
+            'mid_freq_power': 1.8,
+            'high_freq_power': 0.8,
+            'freq_ratio_low_mid': 2.0,
+            'freq_ratio_mid_high': 1.5,
+            'spectral_flatness': 1.8,
+            'temporal_consistency': 2.0,
+            'spectral_smoothness': 1.8,
+            'water_energy_ratio': 2.0,
+            'amplitude_consistency': 1.5
         }
         
-        best_match = None
-        best_similarity = 0
-        
         try:
+            best_match = None
+            best_similarity = 0
+            
             for filename, ref_features in self.reference_features.items():
                 weighted_scores = []
                 total_weight = 0
@@ -195,9 +216,10 @@ class WaterSoundComparer:
             is_match = best_similarity > threshold
             
             if is_match:
-                self.consecutive_matches += 1
                 if self.last_match_time is not None and current_time - self.last_match_time > self.MATCH_TIMEOUT:
                     self.consecutive_matches = 1
+                else:
+                    self.consecutive_matches += 1
             else:
                 self.consecutive_matches = 0
             
@@ -210,69 +232,63 @@ class WaterSoundComparer:
             return final_match, best_match
             
         except Exception as e:
-            print(f"Error in comparison: {str(e)}")
+            print(f"Karşılaştırma hatası: {str(e)}")
             return False, None
 
     def check_light_status(self):
-        """Monitor LDR and check if light has been on too long"""
+        """Işık durumu kontrolü"""
         current_time = time.time()
         light_level = self.ldr_chan.voltage
-        #print("light level " + str(light_level))
 
         if light_level > self.LIGHT_THRESHOLD:
             if self.light_start_time is None:
                 self.light_start_time = current_time
             elif current_time - self.light_start_time > self.LIGHT_ALERT_THRESHOLD:
-                print("Light is open")
+                print("Işık uzun süredir açık!")
                 self.light_start_time = current_time
         else:
             self.light_start_time = None
 
     def monitor_realtime(self):
-        """Monitor real-time audio and light with improved detection"""
+        """Gerçek zamanlı izleme"""
         if not self.reference_features:
-            print("No reference sounds found! Please record some sounds first.")
+            print("Önce referans su sesleri yüklenmelidir!")
             return
             
-        print("\nMonitoring for water sounds and light... (Press Ctrl+C to stop)")
+        print("\nSu sesleri ve ışık izleniyor... (Ctrl+C ile durdurun)")
         buffer = []
         
         try:
             while True:
-                # Read sound sample
                 voltage = self.sound_chan.voltage
                 sample = int((voltage / 3.3) * 32767)
                 buffer.append(sample)
                 
-                # Check light status
                 self.check_light_status()
                 
-                # Process sound when buffer is full
                 if len(buffer) >= self.WINDOW_SIZE:
                     features = self.extract_features(buffer)
                     
                     if features:
                         is_match, matching_file = self.compare_with_references(features)
                         if is_match:
-                            print(f"Water sound detected! Similar to {matching_file}")
+                            print(f"Su sesi algılandı! Eşleşen dosya: {matching_file}")
                     
-                    # Use 75% overlap for smooth detection
                     buffer = buffer[self.WINDOW_SIZE//4:]
                 
                 time.sleep(0.001)
                 
         except KeyboardInterrupt:
-            print("\nStopping monitoring...")
+            print("\nİzleme durduruluyor...")
         except Exception as e:
-            print(f"Error in monitoring: {str(e)}")
+            print(f"İzleme hatası: {str(e)}")
 
 def main():
     try:
         comparer = WaterSoundComparer()
         comparer.monitor_realtime()
     except Exception as e:
-        print(f"Error in main: {str(e)}")
+        print(f"Program hatası: {str(e)}")
 
 if __name__ == "__main__":
     main()
-

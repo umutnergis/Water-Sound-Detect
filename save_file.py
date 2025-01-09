@@ -31,9 +31,9 @@ class WaterSoundRecorder:
         if not os.path.exists(self.samples_dir):
             os.makedirs(self.samples_dir)
 
-    def record_water_sound(self, duration=3):
-        """Record water sound"""
-        print(f"Recording water sound for {duration} seconds...")
+    def record_water_sound(self, duration=5):
+        """Su sesini dinle"""
+        print(f"Recording water sound for 5 seconds...")
         samples = []
         start_time = time.time()
         
@@ -43,7 +43,6 @@ class WaterSoundRecorder:
             sample = int((voltage / 3.3) * 32767)
             samples.append(sample)
             
-            # Maintain sample rate
             elapsed = time.time() - start_time
             target_time = (len(samples) / self.RATE)
             if elapsed < target_time:
@@ -56,7 +55,7 @@ class WaterSoundRecorder:
         return filename
 
     def save_wav(self, samples, filename):
-        """Save samples as WAV file"""
+        """Wav olarak kaydet"""
         filepath = os.path.join(self.samples_dir, filename)
         
         with wave.open(filepath, 'wb') as wf:
@@ -73,7 +72,9 @@ def main():
     
     while True:
         input("\nPress Enter to record water sound (or Ctrl+C to exit)...")
-        recorder.record_water_sound(duration=3)
+        recorder.record_water_sound(duration=5)
 
 if __name__ == "__main__":
     main()
+
+

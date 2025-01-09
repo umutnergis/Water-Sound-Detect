@@ -10,54 +10,55 @@ import wave
 import os
 from datetime import datetime
 
+# Su sesi karşılaştırma sınıfı
 class WaterSoundComparer:
     def __init__(self):
-        # Initialize I2C bus
+        # I2C veri yolunu başlat
         self.i2c = busio.I2C(board.SCL, board.SDA)
         
-        # Initialize ADS1115
+        # ADS1115 analog-dijital dönüştürücüyü başlat
         self.ads = ADS.ADS1115(self.i2c)
         self.ads.gain = 1
         self.ads.data_rate = 860
         
-        # Connect MAX9814 output to A0 and LDR to A1 on ADS1115
+        # MAX9814 ses sensörünü A0'a ve LDR'yi A1'e bağla
         self.sound_chan = AnalogIn(self.ads, ADS.P0)
         self.ldr_chan = AnalogIn(self.ads, ADS.P1)
         
-        # Audio parameters
+        # Ses parametreleri
         self.RATE = 860
         self.CHANNELS = 1
-        self.WINDOW_SIZE = 1720  # 2 seconds for better analysis
+        self.WINDOW_SIZE = 1720  # Daha iyi analiz için 2 saniyelik pencere
         
-        # Sound detection parameters
+        # Ses algılama parametreleri
         self.MIN_AMPLITUDE = 0.1
         self.consecutive_matches = 0
         self.last_match_time = None
-        self.MATCH_TIMEOUT = 10  # seconds
+        self.MATCH_TIMEOUT = 10  # saniye
         self.REQUIRED_MATCHES = 20
 
-        # LDR parameters
+        # LDR (ışık) parametreleri
         self.light_start_time = None
         self.LIGHT_THRESHOLD = 2.4
-        self.LIGHT_ALERT_THRESHOLD = 30  # seconds
+        self.LIGHT_ALERT_THRESHOLD = 30  # saniye
         
-        # Directory and features
+        # Dizin ve özellikler
         self.samples_dir = "water_samples"
         self.reference_features = {}
         self.load_reference_sounds()
 
     def load_reference_sounds(self):
-        """Load all saved water sounds and extract their features"""
+        """Kaydedilmiş su seslerini yükle ve özelliklerini çıkar"""
         if not os.path.exists(self.samples_dir):
-            print("No reference sounds found! Please record some sounds first.")
+            print("Referans ses bulunamadı! Lütfen önce bazı sesler kaydedin.")
             return
 
         wav_files = [f for f in os.listdir(self.samples_dir) if f.endswith('.wav')]
         if not wav_files:
-            print("No .wav files found in water_samples directory!")
+            print("water_samples dizininde .wav dosyası bulunamadı!")
             return
 
-        print("Loading reference sounds...")
+        print("Referans sesler yükleniyor...")
         for wav_file in wav_files:
             filepath = os.path.join(self.samples_dir, wav_file)
             try:
@@ -69,70 +70,70 @@ class WaterSoundComparer:
                     features = self.extract_features(samples)
                     if features is not None:
                         self.reference_features[wav_file] = features
-                        print(f"Loaded features from {wav_file}")
+                        print(f"{wav_file} dosyasından özellikler yüklendi")
             except Exception as e:
-                print(f"Error loading {wav_file}: {str(e)}")
+                print(f"{wav_file} yüklenirken hata oluştu: {str(e)}")
 
     def _spectral_flatness(self, spectrum):
-        """Calculate spectral flatness (Wiener entropy)"""
-        spectrum = spectrum + 1e-10  # Avoid log(0)
+        """Spektral düzlüğü hesapla (Wiener entropi)"""
+        spectrum = spectrum + 1e-10  # log(0)'dan kaçın
         geometric_mean = np.exp(np.mean(np.log(spectrum)))
         arithmetic_mean = np.mean(spectrum)
         return geometric_mean / arithmetic_mean
 
     def _temporal_consistency(self, samples):
-        """Calculate temporal consistency using overlapping windows"""
+        """Örtüşen pencereler kullanarak zamansal tutarlılığı hesapla"""
         window_size = len(samples) // 4
         windows = np.array([samples[i:i+window_size] for i in range(0, len(samples)-window_size, window_size//2)])
         rms_values = np.sqrt(np.mean(windows**2, axis=1))
         return np.std(rms_values) / (np.mean(rms_values) + 1e-10)
 
     def _spectral_rolloff(self, spectrum, freqs, percentile=0.85):
-        """Calculate frequency below which percentile of the spectrum's energy is contained"""
+        """Spektrumun enerjisinin yüzdelik diliminin altında kaldığı frekansı hesapla"""
         cumsum = np.cumsum(spectrum)
         threshold = percentile * cumsum[-1]
         rolloff_index = np.where(cumsum >= threshold)[0][0]
         return freqs[rolloff_index]
 
     def _spectral_bandwidth(self, spectrum, freqs):
-        """Calculate the bandwidth of the spectrum"""
+        """Spektrumun bant genişliğini hesapla"""
         centroid = np.average(freqs, weights=spectrum)
         bandwidth = np.sqrt(np.average((freqs - centroid)**2, weights=spectrum))
         return bandwidth
 
     def extract_features(self, samples):
-        """Extract features from audio samples"""
+        """Ses örneklerinden özellikleri çıkar"""
         if len(samples) == 0:
             return None
             
-        # Convert to numpy array and normalize
+        # Numpy dizisine dönüştür ve normalize et
         samples = np.array(samples, dtype=float)
         max_abs = np.max(np.abs(samples))
         if max_abs > 0:
             samples = samples / max_abs
         
-        # Check if amplitude is too low
+        # Genlik çok düşükse kontrol et
         if np.max(np.abs(samples)) < self.MIN_AMPLITUDE:
             return None
             
-        # Apply Hanning window
+        # Hanning penceresi uygula
         windowed = samples * signal.windows.hann(len(samples))
         
-        # Compute FFT
+        # FFT hesapla
         fft_data = fft(windowed)
         fft_freq = np.fft.fftfreq(len(samples), 1/self.RATE)
         
-        # Get positive frequencies
+        # Pozitif frekansları al
         positive_freq_mask = fft_freq > 0
         fft_data = np.abs(fft_data[positive_freq_mask])
         fft_freq = fft_freq[positive_freq_mask]
         
-        # Frequency band analysis
+        # Frekans bandı analizi
         low_freq = (fft_freq >= 100) & (fft_freq <= 500)
         mid_freq = (fft_freq > 500) & (fft_freq <= 1000)
         high_freq = (fft_freq > 1000) & (fft_freq <= 2000)
         
-        # Extract features with error handling
+        # Özellikleri çıkar ve hata kontrolü yap
         try:
             features = {
                 'low_freq_power': np.mean(fft_data[low_freq]) if any(low_freq) else 0,
@@ -148,14 +149,15 @@ class WaterSoundComparer:
             }
             return features
         except Exception as e:
-            print(f"Error extracting features: {str(e)}")
+            print(f"Özellik çıkarma hatası: {str(e)}")
             return None
 
     def compare_with_references(self, features, threshold=0.8):
-        """Compare current features with reference features"""
+        """Mevcut özellikleri referans özelliklerle karşılaştır"""
         if not self.reference_features or not features:
             return False, None
             
+        # Özellik ağırlıkları
         feature_weights = {
             'low_freq_power': 1.5,
             'mid_freq_power': 1.2,
@@ -210,69 +212,67 @@ class WaterSoundComparer:
             return final_match, best_match
             
         except Exception as e:
-            print(f"Error in comparison: {str(e)}")
+            print(f"Karşılaştırma hatası: {str(e)}")
             return False, None
 
     def check_light_status(self):
-        """Monitor LDR and check if light has been on too long"""
+        """LDR'yi izle ve ışığın çok uzun süre açık kalıp kalmadığını kontrol et"""
         current_time = time.time()
         light_level = self.ldr_chan.voltage
-        #print("light level " + str(light_level))
 
         if light_level > self.LIGHT_THRESHOLD:
             if self.light_start_time is None:
                 self.light_start_time = current_time
             elif current_time - self.light_start_time > self.LIGHT_ALERT_THRESHOLD:
-                print("Light is open")
+                print("Işık açık")
                 self.light_start_time = current_time
         else:
             self.light_start_time = None
 
     def monitor_realtime(self):
-        """Monitor real-time audio and light with improved detection"""
+        """Gerçek zamanlı ses ve ışık izleme"""
         if not self.reference_features:
-            print("No reference sounds found! Please record some sounds first.")
+            print("Referans ses bulunamadı! Lütfen önce bazı sesler kaydedin.")
             return
             
-        print("\nMonitoring for water sounds and light... (Press Ctrl+C to stop)")
+        print("\nSu sesleri ve ışık izleniyor... (Durdurmak için Ctrl+C'ye basın)")
         buffer = []
         
         try:
             while True:
-                # Read sound sample
+                # Ses örneği oku
                 voltage = self.sound_chan.voltage
                 sample = int((voltage / 3.3) * 32767)
                 buffer.append(sample)
                 
-                # Check light status
+                # Işık durumunu kontrol et
                 self.check_light_status()
                 
-                # Process sound when buffer is full
+                # Tampon dolduğunda sesi işle
                 if len(buffer) >= self.WINDOW_SIZE:
                     features = self.extract_features(buffer)
                     
                     if features:
                         is_match, matching_file = self.compare_with_references(features)
                         if is_match:
-                            print(f"Water sound detected! Similar to {matching_file}")
+                            print(f"Su sesi tespit edildi! {matching_file} ile benzer")
                     
-                    # Use 75% overlap for smooth detection
+                    # %75 örtüşme ile pürüzsüz algılama
                     buffer = buffer[self.WINDOW_SIZE//4:]
                 
                 time.sleep(0.001)
                 
         except KeyboardInterrupt:
-            print("\nStopping monitoring...")
+            print("\nİzleme durduruluyor...")
         except Exception as e:
-            print(f"Error in monitoring: {str(e)}")
+            print(f"İzleme hatası: {str(e)}")
 
 def main():
     try:
         comparer = WaterSoundComparer()
         comparer.monitor_realtime()
     except Exception as e:
-        print(f"Error in main: {str(e)}")
+        print(f"Ana program hatası: {str(e)}")
 
 if __name__ == "__main__":
     main()
-
